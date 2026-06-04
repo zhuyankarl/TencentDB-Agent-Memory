@@ -54,6 +54,8 @@ export interface PluginState {
   lastOffloadedToolCallId: string | null;
   /** ISO timestamp of the last successful L2 trigger */
   lastL2TriggerTime: string | null;
+  /** Timestamp of last emergency compression (cooldown tracking) */
+  lastEmergencyTimestamp: number | null;
 }
 
 /** Metadata block embedded in MMD files */

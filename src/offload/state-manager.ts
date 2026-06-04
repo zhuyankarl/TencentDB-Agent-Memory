@@ -27,6 +27,7 @@ const DEFAULT_STATE: PluginState & { estimatedSystemOverhead: number | null } = 
   lastSessionKey: null,
   lastOffloadedToolCallId: null,
   lastL2TriggerTime: null,
+  lastEmergencyTimestamp: null,
   estimatedSystemOverhead: null,
 };
 
@@ -339,6 +340,15 @@ export class OffloadStateManager {
 
   setLastL2TriggerTime(time: string | null): void {
     this.state.lastL2TriggerTime = time;
+  }
+
+  // ─── Emergency Compression Cooldown ────────────────────────────────────
+  getLastEmergencyTimestamp(): number | null {
+    return this.state.lastEmergencyTimestamp;
+  }
+
+  setLastEmergencyTimestamp(timestamp: number | null): void {
+    this.state.lastEmergencyTimestamp = timestamp;
   }
 
   // ─── Full State Access ───────────────────────────────────────────────────

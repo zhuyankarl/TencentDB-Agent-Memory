@@ -178,7 +178,6 @@ export function createLlmInputL3Handler(
     let _mildReplaced = 0;
     let _emergencyTriggered = false;
     let _emergencyDeleted = 0;
-    let _emergencyCycleDetected = false;  // A2-lite: prevent emergency compression cycle
     try {
       const historyMessages = Array.isArray(event.historyMessages) ? event.historyMessages : [];
       if (historyMessages.length > 0) filterHeartbeatMessages(historyMessages, logger);
@@ -313,29 +312,37 @@ export function createLlmInputL3Handler(
       const forceEmergency = stateManager._forceEmergencyNext === true;
       if (forceEmergency) stateManager._forceEmergencyNext = false;
 
-      if ((workingTokens >= emergencyThreshold || forceEmergency) && historyMessages.length > EMERGENCY_MIN_MESSAGES_TO_KEEP) {
-        // A2-lite: prevent infinite cycle when emergency compression creates markers
-        // that keep tokens above threshold
-        if (_emergencyCycleDetected) {
-          logger.warn(`[context-offload] L3(llm_input) EMERGENCY CYCLE DETECTED: tokens≈${workingTokens} still >= ${emergencyThreshold} after previous compression, skipping to prevent infinite loop`);
-        } else {
-          _emergencyTriggered = true;
-          _emergencyCycleDetected = true;  // Mark as triggered for cycle detection
-          logger.warn(`[context-offload] L3(llm_input) EMERGENCY: tokens≈${workingTokens} >= ${emergencyThreshold} (force=${forceEmergency}), target=${emergencyTarget}`);
-          const emergencyResult = emergencyCompress(historyMessages, emergencyTarget, countTokens, sysPrompt, promptText, logger);
-          _emergencyDeleted = emergencyResult.deletedCount;
-          logger.warn(`[context-offload] L3(llm_input) EMERGENCY done: deleted=${emergencyResult.deletedCount}, remaining≈${emergencyResult.remainingTokens}, deletedIds=${emergencyResult.deletedToolCallIds.length}`);
-          if (emergencyResult.deletedToolCallIds.length > 0) {
-            const statusUpdates = new Map<string, string | boolean>();
-            for (const id of emergencyResult.deletedToolCallIds) {
-              statusUpdates.set(id, "deleted");
-              stateManager.confirmedOffloadIds.add(id);
-              stateManager.deletedOffloadIds.add(id);
-            }
-            markOffloadStatus(stateManager.ctx, statusUpdates).catch(() => {});
+      // A2-lite: cooldown-based emergency cycle prevention
+      const now = Date.now();
+      const EMERGENCY_COOLDOWN_MS = 5000; // 5 seconds cooldown between emergency compressions
+      const lastEmergencyTimestamp = stateManager.getLastEmergencyTimestamp() ?? 0;
+      const cooldownRemaining = EMERGENCY_COOLDOWN_MS - (now - lastEmergencyTimestamp);
+
+      if ((workingTokens >= emergencyThreshold || forceEmergency) && 
+          historyMessages.length > EMERGENCY_MIN_MESSAGES_TO_KEEP &&
+          cooldownRemaining <= 0) {
+        // Cooldown passed: execute emergency compression
+        stateManager.setLastEmergencyTimestamp(now);
+        _emergencyTriggered = true;
+        logger.warn(`[context-offload] L3(llm_input) EMERGENCY: tokens≈${workingTokens} >= ${emergencyThreshold} (force=${forceEmergency}), target=${emergencyTarget}`);
+        const emergencyResult = emergencyCompress(historyMessages, emergencyTarget, countTokens, sysPrompt, promptText, logger);
+        _emergencyDeleted = emergencyResult.deletedCount;
+        logger.warn(`[context-offload] L3(llm_input) EMERGENCY done: deleted=${emergencyResult.deletedCount}, remaining≈${emergencyResult.remainingTokens}, deletedIds=${emergencyResult.deletedToolCallIds.length}`);
+        if (emergencyResult.deletedToolCallIds.length > 0) {
+          const statusUpdates = new Map<string, string | boolean>();
+          for (const id of emergencyResult.deletedToolCallIds) {
+            statusUpdates.set(id, "deleted");
+            stateManager.confirmedOffloadIds.add(id);
+            stateManager.deletedOffloadIds.add(id);
           }
-          dumpMessagesSnapshot("after-emergency", historyMessages, logger);
+          markOffloadStatus(stateManager.ctx, statusUpdates).catch(() => {});
         }
+        dumpMessagesSnapshot("after-emergency", historyMessages, logger);
+      } else if ((workingTokens >= emergencyThreshold || forceEmergency) && 
+                 historyMessages.length > EMERGENCY_MIN_MESSAGES_TO_KEEP &&
+                 cooldownRemaining > 0) {
+        // Cooldown active: skip emergency compression to prevent infinite cycle
+        logger.warn(`[context-offload] L3(llm_input) EMERGENCY COOLDOWN: tokens≈${workingTokens} >= ${emergencyThreshold} but cooldown active (${Math.ceil(cooldownRemaining / 1000)}s remaining), skipping to prevent cycle`);
       }
 
       if (stateManager.isLoaded()) await stateManager.save();
